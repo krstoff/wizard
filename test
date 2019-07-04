@@ -1,3 +1,0 @@
-fun new(x of t, y, z, :arg, ...rest) {
-
-}

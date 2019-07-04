@@ -1,60 +1,212 @@
 (in-package :wizard)
 
-(defstruct expr type)
-(defstruct (binop (:include expr)) op left right)
-(defstruct (dot-call (:include expr)) left name args)
-(defstruct (call (:include expr)) left args)
-(defstruct (index-op (:include expr)) left index)
-(defstruct (member-op (:include expr)) left property)
-(defstruct (list-literal (:include expr)) items)
-(defstruct (property-list-literal (:include expr)) props)
-(defstruct (block (:include expr)) statements)
-(defstruct (if-expr (:include expr)) condition block else-block)
-(defstruct (while-expr (:include expr)) condition block)
-(defstruct (loop-expr (:include expr)) expr)
-(defstruct (cond-expr (:include expr)) left clauses)
-(defstruct break-stmt expr)
-(defstruct return-stmt expr)
-(defstruct continue-stmt)
-(defstruct let-stmt bindings expr)
+(defmacro defnode (name &rest fields)
+  `(defstruct
+     (,name
+       (:constructor ,name ,(cons '&OPTIONAL fields))
+       (:constructor ,(intern (concatenate 'string "MAKE-" (symbol-name name)))))
+     ,@fields))
 
-(defstruct fun-decl name args type block)
-(defstruct type-decl name fields)
+;; Expressions
+(defnode dot-call left name args keywords rest-arg)
+(defnode call expr args keywords rest-arg)
+(defnode index-op left index)
+(defnode member-op left property)
+(defnode list-literal items)
+(defnode property-list-literal props)
+(defnode closure-literal name args type body)
+(defnode type-hint left type)
+;; Control
+(defnode block statements)
+(defnode if-expr condition block else-block)
+(defnode while-expr condition block)
+(defnode loop-expr expr)
+(defnode cond-expr left clauses)
+(defnode try-expr block)
+;; Statements
+(defnode break-stmt expr)
+(defnode return-stmt expr)
+(defnode continue-stmt)
+(defnode let-stmt bindings expr)
+;; Declarations
+(defnode fun-decl name args type block)
+(defnode type-decl name fields)
 
-(defun expect-token (expected)
+;; If expected represents a type that is a terminal in the grammar, typechecks.
+;; Otherwise, compares expected by EQL
+(defun expect (expected)
   (let* ((token (advance-token))
          (relevant
            (case expected
              ((sym keyword num str) (type-of token))
              (t token))))
-    (if (eq relevant expected)
+    (if (eql relevant expected)
       token
       (error "Expected ~S, but found ~S" expected token))))
 
 (defun expect-ident ()
-  (let ((token (expect-token 'sym)))
+  (let ((token (expect 'sym)))
     (if (null (sym-path token))
       (sym-name token)
       (error "Expected an unqualified symbol, found ~S instead." token))))
 
 (defun expect-keyword ()
-  (let ((token (expect-token 'keyword)))
+  (let ((token (expect 'keyword)))
     (if (null (keyword-path token))
       (keyword-name token)
-      (error "Expected an unqualified symbol, found ~S instead." token))))
+      (error "Expected an unqualified keyword, found ~S instead." token))))
 
 (defun binary-op-p (token)
   (case token
     ((MUL DIV MOD ADD SUB LESS-THAN LESS-THAN-EQUALS GREATER-THAN
       GREATER-THAN-EQUALS AND OR EQUALS OF AS PERIOD) t)))
 
+(defun lbp (token)
+  (case token
+    ((PERIOD MEMBER LEFT-PAREN LEFT-BRACKET OF) 80)
+
+    ((MUL DIV MOD) 60)
+    ((ADD SUB) 50)
+    ((LESS-THAN LESS-THAN-EQUALS GREATER-THAN GREATER-THAN-EQUALS) 30)
+    ((AND OR) 30)
+    ((COND) 20)
+    ((EQUALS RANGE) 10)
+    (t 0)))
+
+(defun expression (rbp)
+  (iterate
+    (with left = (nud (peek-token)))
+    (while (< rbp (lbp (peek-token))))
+    (setq left (led (peek-token) left))
+    (finally (return left))))
+
+(defun nud (token)
+  (typecase token
+    ((or sym keyword num str) (advance-token))
+    (symbol
+      (case token
+        ((LEFT-PAREN)
+         (advance-token)
+         (when (eq (peek-token) 'RIGHT-PAREN)
+           (error "Can't have empty expression ()"))
+         (prog1
+           (expression 0)
+           (expect 'RIGHT-PAREN)))
+        ((LEFT-BRACKET) (parse-list-items))
+        ((LEFT-BRACE) (parse-block))
+        ((IF)
+         (advance-token)
+         (let ((condition (expression 0))
+               (block (parse-block))
+               (else-block (if (eq 'ELSE (peek-token))
+                               (progn (advance-token)
+                                      (parse-block)))))
+           (make-if-expr :condition condition :block block :else-block else-block)))
+        ((WHILE)
+         (advance-token)
+         (let ((condition (expression 0))
+               (block (parse-block)))
+           (make-while-expr :condition condition :block block)))
+        ((LOOP)
+         (advance-token)
+         (make-loop-expr :expr (expression 0)))
+        ((FUN)
+         (advance-token)
+         (let* ((name (if (not (eq (peek-token) 'LEFT-PAREN))
+                       (expect-ident)))
+                (args (parse-fun-args))
+                (type (when (eq (peek-token) 'OF)
+                        (advance-token)
+                        (parse-type)))
+                (body (parse-block)))
+           (closure-literal name args type body)))
+        ((TRY)
+         (parse-try))
+
+        (t (error "Expected a unary operator but found ~S" token))))
+    (t (error "Expected a unary operator but found ~S" token))))
+
+(defun led (token left)
+  (cond
+    ((eq token 'PERIOD)
+     (advance-token)
+     (apply #'make-dot-call
+       :left left
+       :name (expect 'sym)
+       (parse-call-args)))
+    ((eq token 'LEFT-PAREN)
+     (apply #'make-call
+       :expr left
+       (parse-call-args)))
+    ((eq token 'MEMBER)
+     (advance-token)
+     (make-member-op
+       :left left
+       :property (expect 'sym)))
+    ((eq token 'COND)
+     (advance-token)
+     (make-cond-expr
+       :left left
+       :clauses (parse-cond-clauses)))
+    ((eq token 'LEFT-BRACKET)
+     (advance-token)
+     (make-index-op
+       :left left
+       :index (prog1 (expression 0) (expect 'RIGHT-BRACKET))))
+    ((eq token 'OF)
+     (advance-token)
+     (type-hint left (parse-type)))
+    ((binary-op-p token)
+     (advance-token)
+     (let ((name (make-sym :name token :path nil))
+           (args `(,left ,(expression (lbp token)))))
+       (call name args)))
+
+    (t
+     (error "Expected a binary operator but found ~S" token))))
+
+(defun parse-list-items (&aux first-keyword)
+  (expect 'LEFT-BRACKET)
+  (if (and (typep (peek-token) 'keyword)
+           (setq first-keyword (advance-token))
+           (not (eq 'comma (peek-token))))
+    ;; property list
+    (iterate
+      (when (first-iteration-p)
+        (collect (cons first-keyword (expression 0)) into props)
+        (next-iteration))
+      (when (eq (peek-token) 'RIGHT-BRACKET) (finish))
+      (unless (first-iteration-p)
+        (expect 'COMMA))
+      (collect (cons (expect 'keyword) (expression 0))
+        into props)
+      (finally
+        (return
+          (prog1
+            (property-list-literal props)
+            (expect 'RIGHT-BRACKET)))))
+    ;; regular list
+    (iterate
+      (when (and (first-iteration-p) first-keyword)
+        (collect first-keyword into items)
+        (next-iteration))
+      (when (eq (peek-token) 'RIGHT-BRACKET) (finish))
+      (unless (first-iteration-p)
+        (expect 'COMMA))
+      (collect (expression 0) into items)
+      (finally
+        (return
+          (prog1 (list-literal items)
+                 (expect 'RIGHT-BRACKET)))))))
+
 (defun parse-call-args ()
+  (expect 'LEFT-PAREN)
   (prog1
    (iterate
      (with rest-args = nil)
      (when (eq (peek-token) 'RIGHT-PAREN) (finish))
      (unless (first-time-p)
-       (expect-token 'COMMA))
+       (expect 'COMMA))
      (cond
        ((eq 'ELLIPSIS (peek-token))
         (if rest-args
@@ -72,169 +224,18 @@
        (t
         (collect (expression 0) into args)))
      (finally
-       (return (list :args args :keywords keywords :rest rest-args))))
-   (expect-token 'RIGHT-PAREN)))
-
-(defun parse-list-items (&aux first-keyword)
-  (if (and (eq 'keyword (type-of (peek-token)))
-           (setq first-keyword (advance-token))
-           (not (eq 'comma (peek-token))))
-    ;; property list
-    (iterate
-      (when (first-iteration-p)
-        (collect (cons first-keyword (expression 0)) into props)
-        (next-iteration))
-      (when (eq (peek-token) 'RIGHT-BRACKET) (finish))
-      (unless (first-iteration-p)
-        (expect-token 'COMMA))
-      (collect (cons (expect-token 'keyword) (expression 0))
-        into props)
-      (finally
-        (return
-          (prog1
-            (make-property-list-literal :props props)
-            (expect-token 'RIGHT-BRACKET)))))
-    ;; regular list
-    (iterate
-      (when (and (first-iteration-p) first-keyword)
-        (collect first-keyword into items)
-        (next-iteration))
-      (when (eq (peek-token) 'RIGHT-BRACKET) (finish))
-      (unless (first-iteration-p)
-        (expect-token 'COMMA))
-      (collect (expression 0) into items)
-      (finally
-        (return
-          (prog1 (make-list-literal :items items)
-                 (expect-token 'RIGHT-BRACKET)))))))
-
-(defun parse-cond-clause ()
-  (let* ((pattern
-          (unless (eq (peek-token) 'IF)
-            (expression 0)))
-         (condition
-           (when (eq (peek-token) 'IF)
-             (advance-token)
-             (expression 0)))
-         (block
-           (progn
-             (expect-token 'ARROW)
-             (expect-token 'LEFT-BRACE)
-             (parse-block))))
-    (list :pattern pattern :condition condition :block block)))
-
-(defun parse-cond-clauses ()
-  (expect-token 'LEFT-BRACE)
-  (iterate
-    (until (eq (peek-token) 'RIGHT-BRACE))
-    (collect (parse-cond-clause))
-    (finally (advance-token))))
-
-(defun lbp (token)
-  (case token
-    ((PERIOD LEFT-PAREN) 80)
-    ((NOT) 70)
-    ((MUL DIV MOD) 60)
-    ((ADD SUB) 50)
-    ((LESS-THAN LESS-THAN-EQUALS GREATER-THAN GREATER-THAN-EQUALS) 30)
-    ((AND OR) 30)
-    ((COND) 20)
-    ((EQUALS RANGE) 10)
-    (t 0)))
-
-(defun nud (token)
-  (typecase token
-    ((or sym keyword num str) token)
-    (symbol
-      (case token
-        ((LEFT-PAREN)
-         (when (eq (peek-token) 'RIGHT-PAREN)
-           (error "Can't have empty expression ()"))
-         (prog1
-           (expression 0)
-           (expect-token 'RIGHT-PAREN)))
-        ((LEFT-BRACKET) (parse-list-items))
-        ((LEFT-BRACE) (parse-block))
-        ((IF)
-         (let ((condition (expression 0))
-               (discard (expect-token 'LEFT-BRACE))
-               (block (parse-block))
-               (else-block (if (eq 'ELSE (peek-token))
-                               (progn (advance-token)
-                                      (expect-token 'LEFT-BRACE)
-                                      (parse-block)))))
-           (make-if-expr :condition condition :block block :else-block else-block)))
-        ((WHILE)
-         (let ((condition (expression 0))
-               (discard (expect-token' LEFT-BRACE))
-               (block (parse-block)))
-           (make-while-expr :condition condition :block block)))
-        ((LOOP)
-         (make-loop-expr :expr (expression 0)))
-        (t (error "Expected a unary operator but found ~S" token))))
-    (t (error "Expected a unary operator but found ~S" token))))
-
-(defun led (token left)
-  (cond
-    ((eq token 'PERIOD)
-     (make-dot-call
-       :left left
-       :name (expect-token 'sym)
-       :args (and (expect-token 'LEFT-PAREN) (parse-call-args))))
-    ((eq token 'LEFT-PAREN)
-     (make-call
-       :left left
-       :args (parse-call-args)))
-    ((eq token 'MEMBER)
-     (make-member-op
-       :left left
-       :property (expect-token 'sym)))
-    ((eq token 'COND)
-     (make-cond-expr
-       :left left
-       :clauses (parse-cond-clauses)))
-    ((eq token 'LEFT-BRACKET)
-     (make-index-op
-       :left left
-       :index (prog1 (expression 0) (expect-token 'RIGHT-BRACKET))))
-    ((binary-op-p token)
-     (make-binop :op token :left left :right (expression (lbp token))))
-
-    (t
-     (error "Expected a binary operator but found ~S" token))))
-
-(defun expression (rbp)
-  (iterate
-    (with token = (advance-token))
-    (with left = (nud token))
-
-    (while (< rbp (lbp (peek-token))))
-    (setq token (advance-token))
-    (setq left (led token left))
-
-    (finally (return left))))
+       (return (list :args args :keywords keywords :rest-arg rest-args))))
+   (expect 'RIGHT-PAREN)))
 
 (defun parse-block ()
+  (expect 'LEFT-BRACE)
   (iterate
     (until (eq 'right-brace (peek-token)))
     (collect (statement) into statements)
     (finally
-      (expect-token'right-brace)
+      (expect 'right-brace)
       (return (make-block :statements statements)))))
 
-(defun parse-let ()
-  (expect-token'LET)
-  (let ((bindings
-          (iterate
-            (until (eq 'EQUALS (peek-token)))
-            (unless (first-iteration-p)
-              (expect-token 'COMMA))
-            (collect (expect-ident))
-            (finally (advance-token))))
-        (expr (expression 0)))
-    (make-let-stmt :bindings bindings :expr expr)))
-
-;; TODO: IDEA: Control flow can only appear at the end of a block. Genius. Genius!
 (defun statement ()
   (case (peek-token)
     ((LET) (parse-let))
@@ -246,7 +247,7 @@
          (if (eq 'RIGHT-PAREN (peek-token))
            (prog2 (advance-token) (make-break-stmt))
            (prog1 (make-break-stmt :expr (expression 0))
-                  (expect-token 'RIGHT-PAREN))))
+                  (expect 'RIGHT-PAREN))))
        (make-break-stmt)))
     ((RETURN)
      (advance-token)
@@ -256,21 +257,18 @@
          (if (eq 'RIGHT-PAREN (peek-token))
            (prog2 (advance-token) (make-return-stmt))
            (prog1 (make-return-stmt :expr (expression 0))
-                  (expect-token 'RIGHT-PAREN))))
+                  (expect 'RIGHT-PAREN))))
        (make-return-stmt)))
     ((CONTINUE) (prog2 (advance-token) (make-continue-stmt)))
     (t (expression 0))))
 
-(defun parse-type ()
-  (expect-token 'sym))
-
 (defun parse-fun-args ()
-  (expect-token 'LEFT-PAREN)
+  (expect 'LEFT-PAREN)
   (iterate
     (with rest-arg = nil)
     (until (eq 'RIGHT-PAREN (peek-token)))
     (unless (first-iteration-p)
-      (expect-token 'COMMA))
+      (expect 'COMMA))
     (when (eq 'ELLIPSIS (peek-token))
       (when rest-arg (error "Cannot have more than one rest parameter."))
       (advance-token)
@@ -291,46 +289,85 @@
       (if key (collect arg into keywords)
               (collect arg into args)))
     (finally
-      (expect-token 'RIGHT-PAREN)
+      (expect 'RIGHT-PAREN)
       (return (list :args args :keywords keywords :rest-arg rest-arg)))))
 
+(defun parse-type ()
+  (expect 'sym))
+
+(defun parse-try ()
+  (expect 'try)
+  (make-try-expr :block (parse-block)))
+
+(defun parse-cond-clause ()
+  (let* ((pattern
+          (unless (eq (peek-token) 'IF)
+            (expression 0)))
+         (condition
+           (when (eq (peek-token) 'IF)
+             (advance-token)
+             (expression 0)))
+         (block
+           (progn
+             (expect 'ARROW)
+             (parse-block))))
+    (labels ((check-clause (tree)
+               (typecase tree
+                 (null t)
+                 ((or sym keyword num str) t)
+                 (type-hint t)
+                 (list-literal
+                   (iterate (for value in (list-literal-items tree))
+                     (check value)))
+                 (property-list-literal
+                   (iterate (for (prop . value) in (property-list-literal-props tree))
+                     (check value)))
+                 (t (error "Error: Expected a pattern, found the ~S ~S" (type-of tree) tree)))))
+      (check-clause pattern))
+    (list :pattern pattern :condition condition :block block)))
+
+(defun parse-cond-clauses ()
+  (expect 'LEFT-BRACE)
+  (iterate
+    (until (eq (peek-token) 'RIGHT-BRACE))
+    (collect (parse-cond-clause))
+    (finally (advance-token))))
+
 (defun parse-fun-decl ()
-  (let ((name (expect-token 'sym))
+  (expect 'fun)
+  (let ((name (expect 'sym))
         (args (parse-fun-args))
         (type (when (eq (peek-token) 'of)
                 (advance-token)
                 (parse-type)))
-        (block (prog2 (expect-token 'LEFT-BRACE) (parse-block))))
-    (make-fun-decl :name name :args args :type type :block block)))
+        (block (parse-block)))
+   (make-fun-decl :name name :args args :type type :block block)))
 
 (defun parse-fields ()
-  (expect-token 'LEFT-PAREN)
+  (expect 'LEFT-PAREN)
   (iterate
     (until (eq 'RIGHT-PAREN (peek-token)))
     (unless (first-iteration-p)
-      (expect-token 'COMMA))
-    (let ((name (expect-token 'SYM))
+      (expect 'COMMA))
+    (let ((name (expect 'SYM))
           (type (when (eq 'OF (peek-token))
                   (advance-token)
                   (parse-type))))
-      (collect (cons name type))
-      (finally (expect-token 'RIGHT-PAREN)))))
+      (collect (cons name type) into fields)
+      (finally (expect 'RIGHT-PAREN)
+               (return fields)))))
 
 (defun parse-type-decl ()
-  (let ((name (expect-token 'sym))
+  (expect 'TYPE)
+  (let ((name (expect-ident))
         (fields (parse-fields)))
     (make-type-decl :name name :fields fields)))
 
 (defun decl ()
-  (case (advance-token)
+  (case (peek-token)
     ((FUN)
      (parse-fun-decl))
     ((USE) (error "Unimplemented declaration 'use'"))
     ((TYPE)
      (parse-type-decl))
     (T (error "Unknown declaration."))))
-
-(defun parse ()
-  (iterate
-    (while (peek-token))
-    (collect (decl))))

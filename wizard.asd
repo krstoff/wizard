@@ -9,4 +9,16 @@
                (:file "util")
                (:file "lex")
                (:file "parse")
-               (:file "print")))
+               (:file "print"))
+  :in-order-to ((test-op (test-op "wizard/tests"))))
+
+(defsystem :wizard/tests
+  :depends-on (:wizard :fiveam)
+  :components ((:module "tests"
+                :serial t
+                :components ((:file "package")
+                             (:file "wizard")
+                             (:file "parse"))))
+  :perform (test-op (o s)
+             (uiop:symbol-call :fiveam :run!
+               (uiop:find-symbol* :wizard :wizard-tests))))

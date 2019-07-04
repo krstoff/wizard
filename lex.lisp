@@ -39,10 +39,20 @@
 
 
 ;; token types
+
 (defstruct sym name path)
 (defstruct keyword name path)
 (defstruct num digits)
 (defstruct str contents) ;; contents MAY be nil for empty strings
+
+(defun sym (&optional name path)
+  (make-sym :name name :path path))
+(defun keyword (&optional name path)
+  (make-keyword :name name :path path))
+(defun num (&optional digits)
+  (make-num :digits digits))
+(defun str (&optional contents)
+  (make-str :contents contents))
 
 (defun lex-symbol (&aux (char (peek)))
   "Returns a buffer of characters for a single symbol."
@@ -61,7 +71,7 @@
   (iterate
     (for char next (or (advance) (terminate)))
     (for next-char = (peek))
-    (collect char into buf result-type 'vector)
+    (collect char into buf result-type '(vector character))
     (while (and next-char (digit-char-p next-char)))
     (finally (return buf))))
 
@@ -69,15 +79,16 @@
   "Returns a buffer of characters for a string literal."
   (assert (char= #\" (advance)))
   (iterate
+    (with buf = (new-vec))
     (for char next (or (peek) (error "Unexpected end of file while reading string.")))
     (while (not (char= #\" char)))
     (when (char= #\\ char)
       (advance)
       ;; TODO: switch on the escape character
-      (collect (or (advance) (error "Unexpected end of file while reading string."))
-               into buf)
+      (vector-push-extend (or (advance) (error "Unexpected end of file while reading string."))
+                          buf)
       (next-iteration))
-    (collect (advance) into buf)
+    (vector-push-extend (advance) buf)
     (finally
       (advance)
       (return buf))))
@@ -99,8 +110,8 @@
   (mapcar #'(lambda (s) (cons (string-downcase (symbol-name s)) s))
     '(let try if else for while loop break return continue of as
       fun type pub case open
-      and or not
-      int list float any byte string nil error _)))
+      and or not)))
+      ; TODO: int list float any byte string nil error _)))
 ;; Takes a vector of chars and tries to convert it into a symbol representing a reserved word.
 (defun make-reserved (chars &aux (string (symbol-name chars)))
   (cdr (assoc string +reserved-words+ :test #'equalp)))
@@ -155,7 +166,6 @@
          (case (peek)
            ,@(make-cases fsm s)
            (t (progn
-                (advance)
                 (quote ,(cdr (assoc :value fsm)))))))))))
 
 (defmacro lex-operators (&rest table-rows)
@@ -190,24 +200,31 @@
      (make-num :digits (lex-digits)))
 
     ((char= #\" char)
-     (make-str :contents (lex-string)))
+     (str (lex-string)))
 
     ((char= #\: char)
      (progn
        (advance)
        (if (and (peek) (char= (peek) #\:))
-         (prog2 (advance) 'MEMBER))
-       (lex-syms #'make-keyword)))
+         (prog2 (advance) 'MEMBER)
+         (lex-syms #'make-keyword))))
 
     (nil nil)
     ;; DEBUG
     (t (print (advance)))))
 
-(defun tokenize ()
-  (iterate
-    (for token = (next-token))
-    (while token)
-    (collect token)))
+;; stream must be a stream "designator": a string, a stream, or nil
+(defun tokenize (&optional stream)
+  (let ((*stream* (cond
+                    ((null stream) *stream*)
+                    ((stringp stream) (make-string-input-stream stream))
+                    ((streamp stream) stream)
+                    (t "Error: ~s was not a stream designator." stream))))
+
+    (iterate
+      (for token = (next-token))
+      (while token)
+      (collect token))))
 
 
 (let ((token nil))
