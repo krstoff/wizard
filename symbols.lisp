@@ -12,94 +12,148 @@
         (lookup s (cdr table))))
     nil))
 
-(defun resolve-symbols (tree &optional table)
+(defun tablep (tree) t) ;; Todo make this into a struct.
+
+(defun propagate (table tree)
+  "Builds up the symbol table top down, resolving references,
+  and propagates the types bottom up. Returns new symbols that are available
+  to sibling nodes."
   (typecase tree
-    ((OR NULL CONTINUE NUM STR) nil)
+    ((OR NUM STR KEYWORD CONTINUE NULL) table)
+
     (SYM
-      (if (null (sym-path tree))
-        (if (lookup (sym-name tree) table)
-          (values)
-          (error "~S is undefined", (sym-name tree))))
-      (error "TODO: symbol lookup with paths."))
-    (FUN-DECl
+      (let* ((table (if (sym-path tree)
+                      (iterate
+                        (with t = table)
+                        (for sym in (sym-path tree))
+                        (setq t (lookup s t))
+                        (when (not t) (error "Could not find ~S in this scope." sym))
+                        (finally (return t)))))
+             (entry (lookup (sym-name tree) table)))
+        (if entry
+          (prog2 (setf (getf (node-attrs tree) :type) (getf (node-attrs entry) :type))
+                 table)
+          (error "Could not find ~S in this scope." (sym-name tree)))))
+
+    (FUN-DECL
       (let* ((name (sym-name (fun-decl-name tree)))
-             (args-list (fun-decl-args tree))
-             (positional (getf args-list :args))
-             (keywords (getf args-list :keywords))
-             (rest-arg (getf args-list :rest-arg))
-             (bindings (append (list (cons name tree) rest-arg)
-                         positional keywords rest-arg))
-             (block (fun-decl-block tree))
-             (new-table (make-table bindings table)))
-        (resolve-symbols block new-table)))
-    (BLOCK
-      (let ((stmts (block-statements tree)))
+             (fun-binding (cons name tree))
+             (args (fun-decl-args tree))
+             (arg-bindings (append (getf args :args) (getf args :keywords) (list (getf args :rest-arg))))
+             (new-table (make-table (cons fun-binding arg-bindings) table)))
+
+        (setf (getf (node-attrs tree) :type) (make-fun-type tree))
+        (propagate new-table (fun-decl-body tree))
+        ;; TODO: check declared type against propagated type of body
+        (make-table (list fun-binding) table))) ;; TODO: This is not satisfactory for forward references.
+
+    (TYPE-DECL
+      (let* ((name (sym-name (type-decl-name tree)))
+             (type-binding (cons name tree))
+             (new-table (make-table (list type-binding) table))
+             (fields (type-decl-fields)))
         (iterate
-          (for stmt in stmts)
-          (reducing stmt by (lambda (table st) (resolve-symbols st table))))
-        (values)))
+          (for (f . ty) in fields)
+          (propagate new-table ty)
+          (when (member f fields)
+            (error "Field ~s was found twice in the definition of ~s" f tree))
+          (collect f into fields2))))
+
     (LET-STMT
-      (resolve-symbols (let-stmt-expr tree) table)
-      (make-table (let-stmt-bindings tree) table))
+      (let* ((bindings (iterate (for b in let-stmt-bindings tree) (collect (cons b tree))))
+             (new-table (make-table bindings table)))
+        (propagate table (let-stmt-expr tree))
+        new-table))
 
     (COND-EXPR
-      (error "TODO: Map patterns to new bindings."))
+      (error "TODO: Propagate types and symbols in a COND-EXPR"))
 
-    (BINOP
-      (resolve-symbols (binop-left tree) table)
-      (resolve-symbols (binop-right tree) table)
-      (values))
-
-    (IF-EXPR
-      (resolve-symbols (if-expr-condition tree) table)
-      (resolve-symbols (if-expr-block tree) table)
-      (resolve-symbols (if-expr-else tree) table)
-      (values))
-
-    (WHILE-EXPR
-      (resolve-symbols (while-expr-condition tree) table)
-      (resolve-symbols (while-expr-block tree) table)
-      (values))
-
-    (LOOP-EXPR
-      (resolve-symbols (loop-expr-expr tree) table)
-      (values))
-
-    (BREAK-STMT (resolve-symbols (break-stmt-expr tree) table) (values))
-    (RETURN-STMT (resolve-symbols (return-stmt-expr tree) table) (values))
-
-    (CALL
-      (resolve-symbols (call-left tree) table)
-      (let* ((args (call-args tree))
-             (positional (getf args :args))
-             (keywords (getf args :keywords))
-             (rest-arg (getf args :rest-arg)))
-        (mapc #'(lambda (arg) (resolve-symbols arg table)) args)
-        (mapc #'(lambda (kw) (resolve-symbols (cdr kw) table)) keywords)
-        (resolve-symbols rest-arg table))
-      (values))
-
-    (DOT-CALL
-      (error "TODO: Type resolution."))
-
-
-    (INDEX-OP
-      (resolve-symbols (index-op-left tree) table)
-      (resolve-symbols (index-op-index tree) table)
-      (values))
+    (CLOSURE-LITERAL
+      (error "TODO: Propagate types and symbols in a CLOSURE-LITERAL."))
 
     (MEMBER-OP
-      (resolve-symbols (member-op-left tree) table)
-      (resolve-symbols (member-op-property tree) table)
-      (values))
+      (propagate table (member-op-left tree))
+      (let ((ty (getf (member-op-left tree) :type))
+            (prop (member-op-property tree)))
+        (if ty
+          (if (get-type-field ty prop)
+              table
+              (error "Property ~S is not a field in the type ~S in the expression ~S"
+                prop ty tree))
+          (error "Could not determine the type of ~S" (member-op-left tree)))))
+
+    (DOT-CALL-EXPR
+      (let* ((left (dot-call-expr-left tree))
+             (_ (propagate table left))
+             (ty (or (getf left :type)
+                     (error "Could not determine the type of ~S" left)))
+             (name (dot-call-expr-name tree))
+             (fn (or (get-type-function ty name)
+                     (error "Could not find the associated function ~S for type ~S" name ty)))
+             (args (dot-call-expr-args tree))
+             (kwargs (dot-call-expr-keywords tree))
+             (rest-arg (dot-call-expr-rest-arg tree)))
+        (iterate (for arg in args) (propagate table arg))
+        (iterate (for (kw . arg) in kwargs (propagate table arg)))
+        (propagate table rest-arg)
+        (check-call (fn-type fn) (cons left args) kwargs rest-arg)))
+
+    (CALL-EXPR
+      (let* ((expr (call-expr-expr tree))
+             (_ (propagate table tree))
+             (ty (getf expr :type))
+             (args (call-expr-args tree))
+             (kwargs (call-expr-keywords tree))
+             (rest-arg (call-expr-rest-arg tree)))
+        (iterate (for arg in args) (propagate table arg))
+        (iterate (for (kw . arg) in kwargs (propagate table arg)))
+        (propagate table rest-arg)
+        (check-call ty args kwargs rest-arg)))
+
+    (BLOCK
+      (iterate
+        (for stmt in (block-statements tree))
+        (reducing stmt by #'propagate initial-value table))
+      table)
+
+    (RETURN-STMT
+      (propagate table (return-stmt-expr tree))
+      table)
+
+    (BREAK-STMT
+      (propagate table (break-stmt-expr tree))
+      table)
+
+    (TRY-EXPR
+      (propagate table (try-expr-block tree))
+      table)
+
+    (LOOP
+      (propagate table (loop-expr-expr tree))
+      table)
+
+    (IF-EXPR
+      (propagate table (if-expr-condition tree))
+      (propagate table (if-expr-block tree))
+      (propagate table (if-expr-else-block tree))
+      table)
+
+    (TYPE-HINT
+      (propagate table (type-hint-left tree))
+      (propagate table (type-hint-type tree))
+      table)
+
+    (PROPERTY-LIST-LITERAL
+      (iterate
+        (for (prop . expr) in (property-list-literal-props tree))
+        (propagate table expr))
+      table)
 
     (LIST-LITERAL
-      (let ((items (list-literal-items tree)))
-        (mapc #'(lambda (item) (resolve-symbols item table))) items
-        (values)))
-    (PROPERTY-LIST-LITERAL
-      (let ((props (property-list-literal-props tree)))
-        (iterate
-          (for (p . e) in props)
-          (resolve-symbols e table))
-        (values)))))
+      (iterate
+        (for item in (list-literal-items tree))
+        (propagate table item)))
+
+    (INDEX-OP
+      (propagate table (index-op-left tree))
+      (propagate table (index-op-index tree)))))

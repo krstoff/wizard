@@ -1,8 +1,11 @@
 (in-package :wizard)
 
+(defstruct node attrs)
+
 (defmacro defnode (name &rest fields)
   `(defstruct
      (,name
+       (:include node)
        (:constructor ,name ,(cons '&OPTIONAL fields))
        (:constructor ,(intern (concatenate 'string "MAKE-" (symbol-name name)))))
      ,@fields))
@@ -236,6 +239,18 @@
       (expect 'right-brace)
       (return (make-block :statements statements)))))
 
+(defun parse-let ()
+  (expect 'LET)
+  (let ((bindings
+          (iterate
+            (until (eq 'EQUALS (peek-token)))
+            (unless (first-iteration-p)
+              (expect 'COMMA))
+            (collect (expect-ident))
+            (finally (advance-token))))
+        (expr (expression 0)))
+    (make-let-stmt :bindings bindings :expr expr)))
+
 (defun statement ()
   (case (peek-token)
     ((LET) (parse-let))
@@ -349,7 +364,7 @@
     (until (eq 'RIGHT-PAREN (peek-token)))
     (unless (first-iteration-p)
       (expect 'COMMA))
-    (let ((name (expect 'SYM))
+    (let ((name (expect-ident))
           (type (when (eq 'OF (peek-token))
                   (advance-token)
                   (parse-type))))
