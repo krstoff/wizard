@@ -110,11 +110,14 @@
   (mapcar #'(lambda (s) (cons (string-downcase (symbol-name s)) s))
     '(let try if else for while loop break return continue of as
       fun type pub case open
-      and or not)))
-      ; TODO: int list float any byte string nil error _)))
+      and or not
+      int list float any byte string nil error _)))
 ;; Takes a vector of chars and tries to convert it into a symbol representing a reserved word.
 (defun make-reserved (chars &aux (string (symbol-name chars)))
   (cdr (assoc string +reserved-words+ :test #'equalp)))
+
+(defun simple-type-p (symbol)
+  (member symbol '(|int| |list| |real| |any| |byte| |str| |nil| |error|)))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
  (defun fsm-push (fsm chars value)

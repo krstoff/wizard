@@ -10,29 +10,38 @@
        (:constructor ,(intern (concatenate 'string "MAKE-" (symbol-name name)))))
      ,@fields))
 
+(defstruct (expr :include node) type)
+(defmacro defexpr (name &rest fields)
+  `(defstruct
+     (,name
+       (:include expr)
+       (:constructor ,name ,(cons '&OPTIONAL fields))
+       (:constructor ,(intern (concatenate 'string "MAKE-" (symbol-name name)))))
+     ,@fields))
+
 ;; Expressions
-(defnode dot-call left name args keywords rest-arg)
-(defnode call expr args keywords rest-arg)
-(defnode index-op left index)
-(defnode member-op left property)
-(defnode list-literal items)
-(defnode property-list-literal props)
-(defnode closure-literal name args type body)
-(defnode type-hint left type)
+(defexpr dot-call left name args keywords rest-arg)
+(defexpr call expr args keywords rest-arg)
+(defexpr index-op left index)
+(defexpr member-op left property)
+(defexpr list-literal items)
+(defexpr property-list-literal props)
+(defexpr closure-literal name args type body)
+(defexpr type-hint left type)
 ;; Control
-(defnode block statements)
-(defnode if-expr condition block else-block)
-(defnode while-expr condition block)
-(defnode loop-expr expr)
-(defnode cond-expr left clauses)
-(defnode try-expr block)
+(defexpr block statements)
+(defexpr if-expr condition block else-block)
+(defexpr while-expr condition block)
+(defexpr loop-expr expr)
+(defexpr cond-expr left clauses)
+(defexpr try-expr block)
 ;; Statements
 (defnode break-stmt expr)
 (defnode return-stmt expr)
 (defnode continue-stmt)
 (defnode let-stmt bindings expr)
 ;; Declarations
-(defnode fun-decl name args type block)
+(defnode fun-decl name args kwargs rest-arg result block)
 (defnode type-decl name fields)
 
 ;; If expected represents a type that is a terminal in the grammar, typechecks.
@@ -145,7 +154,7 @@
      (advance-token)
      (make-member-op
        :left left
-       :property (expect 'sym)))
+       :property (expect-ident)))
     ((eq token 'COND)
      (advance-token)
      (make-cond-expr
@@ -246,7 +255,11 @@
             (until (eq 'EQUALS (peek-token)))
             (unless (first-iteration-p)
               (expect 'COMMA))
-            (collect (expect-ident))
+            (let ((name (expect-ident))
+                  (type (when (eq 'OF (peek-token))
+                          (advance-token)
+                          (parse-type))))
+              (collect (cons name type)))
             (finally (advance-token))))
         (expr (expression 0)))
     (make-let-stmt :bindings bindings :expr expr)))
@@ -308,7 +321,13 @@
       (return (list :args args :keywords keywords :rest-arg rest-arg)))))
 
 (defun parse-type ()
-  (expect 'sym))
+  (typecase (peek-token)
+    (SYM (expect 'sym))
+    (SYMBOL
+      (case (peek-token)
+        (t (if (simple-type-p (peek-token))
+             (make-sym :name (advance-token))
+             (error "Expected a type, but found the reserved word ~S" (peek-token))))))))
 
 (defun parse-try ()
   (expect 'try)
@@ -352,11 +371,11 @@
   (expect 'fun)
   (let ((name (expect 'sym))
         (args (parse-fun-args))
-        (type (when (eq (peek-token) 'of)
+        (result (when (eq (peek-token) 'of))
                 (advance-token)
-                (parse-type)))
+                (parse-type))
         (block (parse-block)))
-   (make-fun-decl :name name :args args :type type :block block)))
+   (apply #'make-fun-decl :name name :result result :block block args)))
 
 (defun parse-fields ()
   (expect 'LEFT-PAREN)
