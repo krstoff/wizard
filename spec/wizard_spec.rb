@@ -1,16 +1,12 @@
 RSpec.describe Lexer do
   it "lexes characters" do
-    l = Lexer.new("  bad beef babe", :str)
-    tokens = []
-    l.each_token { |t| tokens.push t }
+    tokens = Lexer.tokens("  bad beef babe", :str)
     expected = %w[bad beef babe].map {|w| Token.new(:ident, w) }
     expect(tokens).to eq(expected)
   end
 
   it "lexes numbers" do
-    l = Lexer.new("  1 2 34", :str)
-    tokens = []
-    l.each_token { |t| tokens.push t }
+    tokens = Lexer.tokens("  1 2 34", :str)
     expected = [1, 2, 34].map {|i| Token.new(:int_literal, i) }
     expect(tokens).to eq(expected)
 

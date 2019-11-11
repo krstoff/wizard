@@ -27,6 +27,15 @@ class Lexer
     @peek = nil
   end
 
+  def Lexer.tokens(fd, *opts)
+    l = Lexer.new(fd, *opts)
+    tokens = []
+    l.each_token do |t|
+      tokens.push(t)
+    end
+    tokens
+  end
+
   def peek_char()
     @peek ||= @stream.readchar()
   end
