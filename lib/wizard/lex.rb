@@ -7,34 +7,14 @@ IDENT_BEGIN_REGEX = /[A-Za-z0-9_]/
 IDENT_REGEX = /[a-zA-Z0-9_-]/
 
 class Token
-  include StructuralEquality
-end
-
-class Ident < Token
-  attr_reader :name
-  def initialize(name)
-    @name = name
+  attr_reader :type, :data
+  def initialize(type, data)
+    @type = type
+    @data = data
   end
-end
 
-class IntLiteral < Token
-  attr_reader :num
-  def initialize(num)
-    @num = num
-  end
-end
-
-class FloatLiteral < Token
-  attr_reader :num
-  def initialize(num)
-    @num = num
-  end
-end
-
-class Unknown < Token
-  attr_reader :char
-  def initialize(char)
-    @char = char
+  def ==(other)
+    self.type == other.type && self.data == other.data
   end
 end
 
@@ -45,6 +25,15 @@ class Lexer
     stream_class = opts.include?(:str) ? StringIO : File
     @stream = stream_class.open(fd, "r:UTF-8")
     @peek = nil
+  end
+
+  def peek_char()
+    @peek ||= @stream.readchar()
+  end
+
+  def next_char()
+      tmp, @peek = @peek, nil
+      tmp or @stream.readchar()
   end
 
   def each_token()
@@ -68,17 +57,8 @@ class Lexer
     when IDENT_BEGIN_REGEX
       lex_ident()
     else
-      Unknown.new(next_char)
+      Token.new(:unknown, next_char)
     end
-  end
-
-  def peek_char()
-    @peek ||= @stream.readchar()
-  end
-
-  def next_char()
-      tmp, @peek = @peek, nil
-      tmp or @stream.readchar()
   end
 
   def lex_ident()
@@ -88,7 +68,7 @@ class Lexer
     rescue EOFError
     end
 
-    Ident.new(ident)
+    Token.new(:ident, ident)
   end
 
   def lex_num()
@@ -104,7 +84,7 @@ class Lexer
       end
     rescue EOFError
     end
-    if period then FloatLiteral.new digits.to_f
-    else IntLiteral.new digits.to_i end
+    if period then Token.new(:float_literal, digits.to_f)
+    else Token.new(:int_literal, digits.to_i) end
   end
 end
