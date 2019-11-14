@@ -1,35 +1,144 @@
-# Wizard
+wizard is a notation for magic.
+--------------------------------
 
-Welcome to your new gem! In this directory, you'll find the files you need to be able to package up your Ruby library into a gem. Put your Ruby code in the file `lib/wizard`. To experiment with that code, run `bin/console` for an interactive prompt.
+## Values
+- strings
+"abcdefg"
 
-TODO: Delete this and the text above, and describe your gem
+- numbers
+1 2 3 -4
+1.0 0.4 -10.0
 
-## Installation
+- symbols
+:name ::whatever/you/want
 
-Add this line to your application's Gemfile:
 
-```ruby
-gem 'wizard'
-```
+- lists
+[1, 2, 3, 4]
 
-And then execute:
+- property lists
+[:author "Bob Avakian", :title "The New Synthesis"]
+{ author: "Bob", title: "The New Synthesis"}
 
-    $ bundle
+- structs
+type book(:author, :title)
+book(:author "Michael Parenti", :title "Blackshirts and Reds")
 
-Or install it yourself as:
+- functions
+fun(x) { x + 2 }
 
-    $ gem install wizard
+## Expressions
+- identifier
+local-name
 
-## Usage
+- literal (see above)
 
-TODO: Write usage instructions here
+- math
+a + b - x * 4 / 1 % size
 
-## Development
+- logic (chained comparisons a la python)
+2 < 4
+4 <= 4
+0 < i <= 12
+on && ready
 
-After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake spec` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
+- indexing
+fruits[12]
 
-To install this gem onto your local machine, run `bundle exec rake install`. To release a new version, update the version number in `version.rb`, and then run `bundle exec rake release`, which will create a git tag for the version, push git commits and tags, and push the `.gem` file to [rubygems.org](https://rubygems.org).
+- property access
+robot::test
+You need virtual properties someday.
 
-## Contributing
+-  function calls
+do-thing("string")
+string/concat("string", "string")
+list(:with-capacity 50)
 
-Bug reports and pull requests are welcome on GitHub at https://github.com/[USERNAME]/wizard.
+- pipe operator
+"string" .do-thing()
+h .hashmap/keys()
+list .find-all(even)s
+
+- parens
+(a + b) * c
+
++ hint, cast
+num of int
+integer as float
+
++ blocks
+{
+    let x = 1
+    x + 2     # last expression is returned
+}
+
+- assignment
+x = 12
+book::isbn = 15
+list[40] = 10
+
+## control flow
+All of the following are still expressions.
+
+return x
+
+if 2 < x < 10 { 10 }
+else { 5 }
+
+if x.bad() { return bad-error(x) }
+
+while iter.running() {
+    iter .next()
+}
+loop get-it()
+loop { do-it() }
+
+for x in [0, 5, 10] { print(x) }
+while iter.running() {
+  if signal.recieve() {
+    break(help)
+  }
+}
+break 19
+continue
+
+try {
+    let data = download_files()
+    let findings = analyze(data)
+    print(findings)
+}
+
+## patterns
+count ? {
+  0 -> { panic(:empty) }
+  n -> { prepare_tasks() }
+}
+
+report ? {
+  if report::processing -> { whatever }
+  r if r::special -> {
+    log-report(r)
+    handle-special-report(r)
+  }
+  r -> { graph(r::data) }
+}
+
+list ? {
+  [] ->
+  [a, b, ...rest] ->
+  _ -> do something else
+}
+
+db-find(thing) ? {
+  e of auth-err -> { permissions-denied() }
+  e of error -> { log(e); return }
+  val -> do-it()
+}
+
+alternatively, you can write
+let result = db-find(thing)
+result ? {
+  of auth-err -> { permissions-denied() }
+  of error -> { log(result); return }
+  _ -> do-it()
+}
